@@ -1,0 +1,8 @@
+[package]
+name = "s3-grabber"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.30.0"
+crossterm = "0.29.0"
