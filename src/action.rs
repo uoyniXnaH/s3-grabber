@@ -51,18 +51,15 @@ impl WorkTab {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Action {
     QuitRequested,
-    ConfirmQuit,
     CancelDialog,
     MoveUp,
     MoveDown,
     MoveLeft,
     MoveRight,
     Enter,
-    GoParent,
+    BackspaceKey,
     FocusNext,
     ToggleSelectCurrent,
-    SelectAllVisible,
-    ClearSelection,
     NextTab,
     PreviousTab,
     OpenPreview,
@@ -73,5 +70,6 @@ pub enum Action {
     Refresh,
     OpenFilter,
     ToggleHelp,
+    InputChar(char),
     Tick,
 }

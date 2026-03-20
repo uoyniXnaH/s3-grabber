@@ -34,6 +34,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         components::help_modal::render(frame, area);
     }
 
+    if app.ui.show_connection_settings {
+        components::connection_settings::render(frame, area, app);
+    }
+
     if app.ui.confirm_quit {
         render_quit_dialog(frame, area);
     }
@@ -47,7 +51,7 @@ fn render_top_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
 
     let line = Line::from(format!(
         "Profile: {}  Region: {}  Bucket: {}  Path: {}  Mode: {}  Focus: {}",
-        app.session.profile,
+        app.display_profile(),
         app.session.region,
         app.session.bucket,
         app.session.path,
