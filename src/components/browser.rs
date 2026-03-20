@@ -1,0 +1,48 @@
+use ratatui::{
+    layout::Rect,
+    style::Style,
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, ListState},
+    Frame,
+};
+
+use crate::{action::Focus, app::App};
+
+pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let title = if app.ui.focus == Focus::Browser {
+        "S3 Browser [focus]"
+    } else {
+        "S3 Browser"
+    };
+
+    let items = app
+        .browser
+        .items
+        .iter()
+        .map(|item| {
+            let mark = if app.browser.selected.contains(&item.name) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let kind = if item.is_dir { "DIR" } else { "OBJ" };
+            let size = item
+                .size
+                .map(|v| format!("{v} B"))
+                .unwrap_or_else(|| "-".to_string());
+
+            ListItem::new(Line::from(format!(
+                "{mark} {kind:<3} {:<26} {:>10} {}",
+                item.name, size, item.modified
+            )))
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = ListState::default().with_selected(Some(app.browser.cursor));
+    let list = List::new(items)
+        .highlight_symbol("> ")
+        .highlight_style(Style::new().cyan().bold())
+        .block(Block::default().borders(Borders::ALL).title(title));
+
+    frame.render_stateful_widget(list, area, &mut state);
+}
