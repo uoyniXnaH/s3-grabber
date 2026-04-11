@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::action::{Action, Focus, WorkTab};
+use crate::services::s3::{
+    list_objects_sync, resolve_target, validate_endpoint_url, S3ConnectParams, S3ListResult,
+    S3Target, TargetWarning,
+};
 
 #[derive(Debug, Clone)]
 pub struct SessionState {
@@ -25,6 +29,7 @@ pub struct BrowserState {
     pub items: Vec<BrowserItem>,
     pub cursor: usize,
     pub selected: BTreeSet<String>,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +159,7 @@ impl App {
                 items,
                 cursor: 0,
                 selected: BTreeSet::new(),
+                warning: None,
             },
             queue: QueueState {
                 done_files: 0,
@@ -285,7 +291,7 @@ impl App {
                     .push("INFO post-process script completed".to_string());
             }
             Action::Refresh | Action::InputChar('r') => {
-                self.logs.push("INFO refreshed S3 listing".to_string());
+                self.reload_current_listing();
             }
             Action::OpenFilter | Action::InputChar('/') => {
                 self.logs
@@ -323,11 +329,25 @@ impl App {
         }
     }
 
-    pub fn display_endpoint_url(&self) -> &str {
-        if self.session.endpoint_url.trim().is_empty() {
-            "default-s3"
-        } else {
-            self.session.endpoint_url.as_str()
+    pub fn display_effective_target(&self) -> String {
+        let (target, _) = resolve_target(&self.session.profile, &self.session.endpoint_url);
+        match target {
+            S3Target::Profile { profile } => format!("aws-profile:{profile}"),
+            S3Target::Endpoint { endpoint_url } => format!("endpoint:{endpoint_url}"),
+            S3Target::DefaultChain => "default-chain".to_string(),
+        }
+    }
+
+    pub fn connection_modal_warning(&self) -> Option<&'static str> {
+        let (_, warning) = resolve_target(
+            &self.ui.connection_draft.profile,
+            &self.ui.connection_draft.endpoint_url,
+        );
+        match warning {
+            Some(TargetWarning::ProfileOverridesEndpoint) => {
+                Some("Profile is set, endpoint-url will be ignored.")
+            }
+            None => None,
         }
     }
 
@@ -389,13 +409,54 @@ impl App {
             return;
         }
 
-        self.session.profile = self.ui.connection_draft.profile.trim().to_string();
-        self.session.region = self.ui.connection_draft.region.trim().to_string();
-        self.session.bucket = self.ui.connection_draft.bucket.trim().to_string();
-        self.session.path = normalize_prefix(self.ui.connection_draft.prefix.trim());
-        self.session.endpoint_url = self.ui.connection_draft.endpoint_url.trim().to_string();
-        self.session.mode = "Browse".to_string();
+        let draft_profile = self.ui.connection_draft.profile.trim().to_string();
+        let draft_region = self.ui.connection_draft.region.trim().to_string();
+        let draft_bucket = self.ui.connection_draft.bucket.trim().to_string();
+        let draft_prefix = normalize_prefix(self.ui.connection_draft.prefix.trim());
+        let draft_endpoint = self.ui.connection_draft.endpoint_url.trim().to_string();
+        let (target, warning) = resolve_target(&draft_profile, &draft_endpoint);
 
+        if let S3Target::Endpoint { endpoint_url } = &target {
+            if let Err(err) = validate_endpoint_url(endpoint_url) {
+                let message = format!("Invalid endpoint-url: {err}");
+                self.ui.connection_draft.error = Some(message.clone());
+                self.browser.warning = Some(message.clone());
+                self.logs.push(format!(
+                    "WARN connection rejected due to endpoint-url: {err}"
+                ));
+                return;
+            }
+        }
+
+        let params = S3ConnectParams {
+            profile: draft_profile.clone(),
+            region: draft_region.clone(),
+            bucket: draft_bucket.clone(),
+            prefix: draft_prefix.clone(),
+            endpoint_url: draft_endpoint.clone(),
+            max_keys: 200,
+        };
+
+        let listing = match list_objects_sync(&params) {
+            Ok(listing) => listing,
+            Err(err) => {
+                let message = "Connection failed. See Logs tab for details.".to_string();
+                self.ui.connection_draft.error = Some(message.clone());
+                self.browser.warning = Some(message);
+                self.push_warn_multiline("connection failed", &err);
+                return;
+            }
+        };
+
+        self.session.profile = draft_profile;
+        self.session.region = draft_region;
+        self.session.bucket = draft_bucket;
+        self.session.path = draft_prefix;
+        self.session.endpoint_url = draft_endpoint;
+        self.session.mode = "Browse".to_string();
+        self.browser.warning = None;
+
+        self.browser.items = self.build_browser_items(&listing);
         self.browser.selected.clear();
         self.browser.cursor = 0;
         self.queue.done_files = 0;
@@ -403,22 +464,20 @@ impl App {
         self.queue.done_bytes = 0;
         self.queue.total_bytes = 0;
 
+        let target_msg = match target {
+            S3Target::Profile { profile } => format!("aws-profile:{profile}"),
+            S3Target::Endpoint { endpoint_url } => format!("endpoint:{endpoint_url}"),
+            S3Target::DefaultChain => "default-chain".to_string(),
+        };
         self.logs.push(format!(
-            "INFO connection updated profile={} region={} bucket={} prefix={} endpoint_url={}",
-            if self.session.profile.is_empty() {
-                "default-chain"
-            } else {
-                self.session.profile.as_str()
-            },
-            self.session.region,
-            self.session.bucket,
-            self.session.path,
-            if self.session.endpoint_url.is_empty() {
-                "<default-s3>"
-            } else {
-                self.session.endpoint_url.as_str()
-            }
+            "INFO connection updated target={} region={} bucket={} prefix={}",
+            target_msg, self.session.region, self.session.bucket, self.session.path
         ));
+
+        if matches!(warning, Some(TargetWarning::ProfileOverridesEndpoint)) {
+            self.logs
+                .push("WARN endpoint-url ignored because profile takes precedence".to_string());
+        }
 
         self.ui.connection_draft.error = None;
         self.ui.show_connection_settings = false;
@@ -450,6 +509,66 @@ impl App {
             self.queue.total_files
         ));
     }
+
+    fn reload_current_listing(&mut self) {
+        let params = S3ConnectParams {
+            profile: self.session.profile.clone(),
+            region: self.session.region.clone(),
+            bucket: self.session.bucket.clone(),
+            prefix: self.session.path.clone(),
+            endpoint_url: self.session.endpoint_url.clone(),
+            max_keys: 200,
+        };
+
+        match list_objects_sync(&params) {
+            Ok(listing) => {
+                self.browser.items = self.build_browser_items(&listing);
+                self.browser.cursor = 0;
+                self.browser.warning = None;
+                self.logs.push(format!(
+                    "INFO refreshed S3 listing target={}",
+                    self.display_effective_target()
+                ));
+            }
+            Err(err) => {
+                self.browser.warning =
+                    Some("S3 refresh failed. See Logs tab for details.".to_string());
+                self.push_warn_multiline("S3 refresh failed", &err);
+            }
+        }
+    }
+
+    fn build_browser_items(&self, listing: &S3ListResult) -> Vec<BrowserItem> {
+        let base_prefix = api_prefix_from_path(&self.session.path);
+        let mut items = Vec::new();
+
+        for prefix in &listing.prefixes {
+            items.push(BrowserItem {
+                is_dir: true,
+                name: display_key(prefix, base_prefix.as_deref()),
+                size: None,
+                modified: "-".to_string(),
+            });
+        }
+
+        for object in &listing.objects {
+            items.push(BrowserItem {
+                is_dir: false,
+                name: display_key(&object.key, base_prefix.as_deref()),
+                size: Some(object.size),
+                modified: object.modified.clone(),
+            });
+        }
+
+        items
+    }
+
+    fn push_warn_multiline(&mut self, headline: &str, detail: &str) {
+        self.logs.push(format!("WARN {headline}"));
+        for line in detail.lines() {
+            self.logs.push(format!("WARN {line}"));
+        }
+    }
 }
 
 fn normalize_prefix(prefix: &str) -> String {
@@ -461,5 +580,25 @@ fn normalize_prefix(prefix: &str) -> String {
         prefix.to_string()
     } else {
         format!("/{prefix}")
+    }
+}
+
+fn api_prefix_from_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.ends_with('/') {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("{trimmed}/"))
+    }
+}
+
+fn display_key(key: &str, base_prefix: Option<&str>) -> String {
+    match base_prefix {
+        Some(base) => key
+            .strip_prefix(base)
+            .map_or_else(|| key.to_string(), ToString::to_string),
+        None => key.to_string(),
     }
 }

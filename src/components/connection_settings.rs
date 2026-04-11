@@ -55,6 +55,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         &app.ui.connection_draft.endpoint_url,
     );
 
+    if let Some(warning) = app.connection_modal_warning() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Warning: {warning}")).yellow());
+    }
+
     if let Some(error) = &app.ui.connection_draft.error {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Error: {error}")).red());

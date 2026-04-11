@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::Rect,
-    style::Style,
+    layout::{Constraint, Layout, Rect},
+    style::{Style, Stylize},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -44,5 +44,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_style(Style::new().cyan().bold())
         .block(Block::default().borders(Borders::ALL).title(title));
 
-    frame.render_stateful_widget(list, area, &mut state);
+    if let Some(warning) = &app.browser.warning {
+        let [warning_area, list_area] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+        let warning = Paragraph::new(Line::from(format!("Warning: {warning}")).red())
+            .block(Block::default().borders(Borders::ALL).title("S3 Warning"));
+        frame.render_widget(warning, warning_area);
+        frame.render_stateful_widget(list, list_area, &mut state);
+    } else {
+        frame.render_stateful_widget(list, area, &mut state);
+    }
 }
