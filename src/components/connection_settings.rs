@@ -17,6 +17,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         "Configure S3 context. Profile is optional (empty => default-chain).",
     ));
     lines.push(Line::from(
+        "Endpoint URL is optional (empty => standard AWS S3 endpoint).",
+    ));
+    lines.push(Line::from(
         "Tab/Shift+Tab move field  Enter apply  Esc cancel",
     ));
     lines.push(Line::from(""));
@@ -44,6 +47,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ConnectionField::Prefix,
         app,
         &app.ui.connection_draft.prefix,
+    );
+    push_field(
+        &mut lines,
+        ConnectionField::EndpointUrl,
+        app,
+        &app.ui.connection_draft.endpoint_url,
     );
 
     if let Some(error) = &app.ui.connection_draft.error {

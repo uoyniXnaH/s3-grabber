@@ -50,11 +50,12 @@ fn render_top_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
     };
 
     let line = Line::from(format!(
-        "Profile: {}  Region: {}  Bucket: {}  Path: {}  Mode: {}  Focus: {}",
+        "Profile: {}  Region: {}  Bucket: {}  Path: {}  Endpoint: {}  Mode: {}  Focus: {}",
         app.display_profile(),
         app.session.region,
         app.session.bucket,
         app.session.path,
+        app.display_endpoint_url(),
         app.session.mode,
         focus,
     ));

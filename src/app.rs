@@ -8,6 +8,7 @@ pub struct SessionState {
     pub region: String,
     pub bucket: String,
     pub path: String,
+    pub endpoint_url: String,
     pub mode: String,
 }
 
@@ -48,6 +49,7 @@ pub enum ConnectionField {
     Region,
     Bucket,
     Prefix,
+    EndpointUrl,
 }
 
 impl ConnectionField {
@@ -56,16 +58,18 @@ impl ConnectionField {
             Self::Profile => Self::Region,
             Self::Region => Self::Bucket,
             Self::Bucket => Self::Prefix,
-            Self::Prefix => Self::Profile,
+            Self::Prefix => Self::EndpointUrl,
+            Self::EndpointUrl => Self::Profile,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Profile => Self::Prefix,
+            Self::Profile => Self::EndpointUrl,
             Self::Region => Self::Profile,
             Self::Bucket => Self::Region,
             Self::Prefix => Self::Bucket,
+            Self::EndpointUrl => Self::Prefix,
         }
     }
 
@@ -75,6 +79,7 @@ impl ConnectionField {
             Self::Region => "Region",
             Self::Bucket => "Bucket",
             Self::Prefix => "Prefix",
+            Self::EndpointUrl => "Endpoint URL",
         }
     }
 }
@@ -85,6 +90,7 @@ pub struct ConnectionDraft {
     pub region: String,
     pub bucket: String,
     pub prefix: String,
+    pub endpoint_url: String,
     pub active_field: ConnectionField,
     pub error: Option<String>,
 }
@@ -138,6 +144,7 @@ impl App {
             region: "ap-northeast-1".to_string(),
             bucket: "my-bucket".to_string(),
             path: "/".to_string(),
+            endpoint_url: "".to_string(),
             mode: "Browse".to_string(),
         };
 
@@ -171,6 +178,7 @@ impl App {
                     region: session.region.clone(),
                     bucket: session.bucket.clone(),
                     prefix: session.path.clone(),
+                    endpoint_url: session.endpoint_url.clone(),
                     active_field: ConnectionField::Profile,
                     error: None,
                 },
@@ -315,11 +323,20 @@ impl App {
         }
     }
 
+    pub fn display_endpoint_url(&self) -> &str {
+        if self.session.endpoint_url.trim().is_empty() {
+            "default-s3"
+        } else {
+            self.session.endpoint_url.as_str()
+        }
+    }
+
     fn open_connection_settings(&mut self) {
         self.ui.connection_draft.profile = self.session.profile.clone();
         self.ui.connection_draft.region = self.session.region.clone();
         self.ui.connection_draft.bucket = self.session.bucket.clone();
         self.ui.connection_draft.prefix = self.session.path.clone();
+        self.ui.connection_draft.endpoint_url = self.session.endpoint_url.clone();
         self.ui.connection_draft.active_field = ConnectionField::Profile;
         self.ui.connection_draft.error = None;
         self.ui.show_connection_settings = true;
@@ -362,6 +379,7 @@ impl App {
             ConnectionField::Region => &mut self.ui.connection_draft.region,
             ConnectionField::Bucket => &mut self.ui.connection_draft.bucket,
             ConnectionField::Prefix => &mut self.ui.connection_draft.prefix,
+            ConnectionField::EndpointUrl => &mut self.ui.connection_draft.endpoint_url,
         }
     }
 
@@ -375,6 +393,7 @@ impl App {
         self.session.region = self.ui.connection_draft.region.trim().to_string();
         self.session.bucket = self.ui.connection_draft.bucket.trim().to_string();
         self.session.path = normalize_prefix(self.ui.connection_draft.prefix.trim());
+        self.session.endpoint_url = self.ui.connection_draft.endpoint_url.trim().to_string();
         self.session.mode = "Browse".to_string();
 
         self.browser.selected.clear();
@@ -385,7 +404,7 @@ impl App {
         self.queue.total_bytes = 0;
 
         self.logs.push(format!(
-            "INFO connection updated profile={} region={} bucket={} prefix={}",
+            "INFO connection updated profile={} region={} bucket={} prefix={} endpoint_url={}",
             if self.session.profile.is_empty() {
                 "default-chain"
             } else {
@@ -393,7 +412,12 @@ impl App {
             },
             self.session.region,
             self.session.bucket,
-            self.session.path
+            self.session.path,
+            if self.session.endpoint_url.is_empty() {
+                "<default-s3>"
+            } else {
+                self.session.endpoint_url.as_str()
+            }
         ));
 
         self.ui.connection_draft.error = None;

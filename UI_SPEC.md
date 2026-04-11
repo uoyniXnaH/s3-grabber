@@ -113,6 +113,7 @@ Fields:
 - `Region`
 - `Bucket` (required)
 - `Prefix`
+- `Endpoint URL (optional)` (empty = standard AWS S3 endpoint)
 
 Validation:
 - Bucket is required before apply.
@@ -152,6 +153,7 @@ Core UI/application state components:
 - `ScriptState`: command config, execution mode, last exit code and stderr summary.
 - `UiState`: active pane focus, active tab, modal flags (`help`, `confirm_quit`, `connection_settings`), notifications.
 - `ConnectionDraft`: editable connection fields (`profile`, `region`, `bucket`, `prefix`) and validation error.
+- `ConnectionDraft`: editable connection fields (`profile`, `region`, `bucket`, `prefix`, `endpoint_url`) and validation error.
 - `ConfigState`: defaults for download dir, concurrency, retries, preview limit.
 
 ## 7. Functional Rules
@@ -178,3 +180,4 @@ Core UI/application state components:
 - User can open Help (`h`) and understand all major key actions.
 - User can jump to logs with `l` and troubleshoot failed operations.
 - User can open Connection Settings (`c`), edit profile/region/bucket/prefix, and apply changes.
+- User can optionally set `endpoint-url` for local S3 mock endpoints and apply changes.

@@ -25,10 +25,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             app.queue.eta
         )),
         Line::from(format!(
-            "Profile: {}  Region: {}  Bucket: {}  Script: {}  Last: {}",
+            "Profile: {}  Region: {}  Bucket: {}  Endpoint: {}  Script: {}  Last: {}",
             app.display_profile(),
             app.session.region,
             app.session.bucket,
+            app.display_endpoint_url(),
             app.script.command,
             app.script.last_result
         )),
