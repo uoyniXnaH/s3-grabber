@@ -19,6 +19,7 @@ Shows current session and navigation context:
 - `Region`
 - `Bucket`
 - `Path` (current prefix)
+- `Target` (effective target only: `aws-profile:<name>` / `endpoint:<url>` / `default-chain`)
 - `Mode` (`Browse | Download | Script | Error`)
 
 ### 2.2 Main Area
@@ -58,7 +59,7 @@ Tab responsibilities:
 Three fixed lines:
 - Line 1: key hints (`h help`, `c connection`, navigation, selection, download actions).
 - Line 2: transfer progress summary (`files`, `bytes`, `speed`, `ETA`).
-- Line 3: profile/session/script status (script name, last result).
+- Line 3: profile/session/script status including effective `Target` (script name, last result).
 
 ## 3. Keymap
 Cross-platform safe keys only.
@@ -118,11 +119,19 @@ Fields:
 Validation:
 - Bucket is required before apply.
 - Inline error is shown in modal if validation fails.
+- If both `profile` and `endpoint-url` are set, a warning is shown and `profile` takes precedence.
+- If `endpoint-url` is selected as effective target and is invalid/unreachable, apply fails with no fallback.
 
 Apply result:
-- Session context updates (`profile`, `region`, `bucket`, `path`).
-- Selection and in-memory queue counters are reset.
-- Connection change is logged in `Logs` tab.
+- On success:
+ - Session context updates (`profile`, `region`, `bucket`, `path`, `endpoint_url`).
+ - Browser list is fetched from S3 (`ListObjectsV2`) immediately.
+ - Selection and in-memory queue counters are reset.
+ - Connection change is logged in `Logs` tab.
+- On failure:
+ - Existing active session context remains unchanged.
+ - A warning is shown in the left pane (`S3 Browser`).
+ - Detailed multiline diagnostics are written to `Logs` tab.
 
 ## 5. Help Panel Spec
 A beginner-friendly key reference popup.
@@ -145,14 +154,13 @@ Footer requirement:
 
 ## 6. State Model
 Core UI/application state components:
-- `SessionState`: profile, region, bucket, current prefix, connectivity.
-- `BrowserState`: item list, cursor index, filter text, pagination token.
+- `SessionState`: profile, region, bucket, current prefix, endpoint_url, connectivity.
+- `BrowserState`: item list, cursor index, selected set, warning message.
 - `SelectionState`: selected object keys and selected folder prefixes.
 - `PreviewState`: key, loading status, text buffer, truncation, preview errors.
 - `QueueState`: jobs and aggregate progress.
 - `ScriptState`: command config, execution mode, last exit code and stderr summary.
 - `UiState`: active pane focus, active tab, modal flags (`help`, `confirm_quit`, `connection_settings`), notifications.
-- `ConnectionDraft`: editable connection fields (`profile`, `region`, `bucket`, `prefix`) and validation error.
 - `ConnectionDraft`: editable connection fields (`profile`, `region`, `bucket`, `prefix`, `endpoint_url`) and validation error.
 - `ConfigState`: defaults for download dir, concurrency, retries, preview limit.
 
@@ -164,6 +172,10 @@ Core UI/application state components:
 - Unsupported/binary content shows metadata-only preview message.
 - Confirm before quitting with running jobs.
 - Connection settings are changeable at runtime via `c` modal.
+- Target precedence: `profile` > `endpoint-url` > default chain.
+- If `profile` and `endpoint-url` are both set, endpoint is ignored (with warning).
+- If effective `endpoint-url` connection fails, app must not fall back to default chain.
+- `r` refresh performs a real S3 listing and reports failures in left-pane warning + logs.
 
 ## 8. MVP Constraints
 - Text preview size cap (default: `1 MiB`).
@@ -181,3 +193,5 @@ Core UI/application state components:
 - User can jump to logs with `l` and troubleshoot failed operations.
 - User can open Connection Settings (`c`), edit profile/region/bucket/prefix, and apply changes.
 - User can optionally set `endpoint-url` for local S3 mock endpoints and apply changes.
+- User can see effective target in top/bottom status (`profile` target hides ignored endpoint as active target).
+- Invalid or unreachable endpoint-url shows warning in S3 Browser and does not auto-fallback.
