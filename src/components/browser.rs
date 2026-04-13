@@ -6,7 +6,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::{action::Focus, app::App};
+use crate::{
+    action::Focus,
+    app::{App, BrowserItemKind},
+};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let title = if app.ui.focus == Focus::Browser {
@@ -20,12 +23,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .items
         .iter()
         .map(|item| {
-            let mark = if app.browser.selected.contains(&item.name) {
+            let selectable = !matches!(item.kind, BrowserItemKind::Parent);
+            let mark = if selectable && app.browser.selected.contains(&item.key) {
                 "[x]"
-            } else {
+            } else if selectable {
                 "[ ]"
+            } else {
+                "   "
             };
-            let kind = if item.is_dir { "DIR" } else { "OBJ" };
+            let kind = match item.kind {
+                BrowserItemKind::Parent => "UP",
+                BrowserItemKind::Dir => "DIR",
+                BrowserItemKind::Obj => "OBJ",
+            };
             let size = item
                 .size
                 .map(|v| format!("{v} B"))

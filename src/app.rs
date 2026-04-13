@@ -18,10 +18,19 @@ pub struct SessionState {
 
 #[derive(Debug, Clone)]
 pub struct BrowserItem {
+    pub kind: BrowserItemKind,
     pub is_dir: bool,
+    pub key: String,
     pub name: String,
     pub size: Option<u64>,
     pub modified: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BrowserItemKind {
+    Parent,
+    Dir,
+    Obj,
 }
 
 #[derive(Debug, Clone)]
@@ -125,19 +134,25 @@ impl App {
     pub fn new() -> Self {
         let items = vec![
             BrowserItem {
+                kind: BrowserItemKind::Dir,
                 is_dir: true,
+                key: "logs/".to_string(),
                 name: "logs/".to_string(),
                 size: None,
                 modified: "-".to_string(),
             },
             BrowserItem {
+                kind: BrowserItemKind::Dir,
                 is_dir: true,
+                key: "reports/".to_string(),
                 name: "reports/".to_string(),
                 size: None,
                 modified: "-".to_string(),
             },
             BrowserItem {
+                kind: BrowserItemKind::Obj,
                 is_dir: false,
+                key: "README.txt".to_string(),
                 name: "README.txt".to_string(),
                 size: Some(2_048),
                 modified: "2026-03-20 10:00".to_string(),
@@ -240,8 +255,7 @@ impl App {
                 }
             }
             Action::BackspaceKey => {
-                self.logs
-                    .push("INFO parent prefix navigation not yet implemented".to_string());
+                self.go_parent_prefix();
             }
             Action::FocusNext | Action::InputChar('f') => {
                 self.ui.focus = match self.ui.focus {
@@ -251,17 +265,23 @@ impl App {
             }
             Action::ToggleSelectCurrent => {
                 if let Some(item) = self.browser.items.get(self.browser.cursor) {
-                    if self.browser.selected.contains(&item.name) {
-                        self.browser.selected.remove(&item.name);
-                    } else {
-                        self.browser.selected.insert(item.name.clone());
+                    if item_is_selectable(item) {
+                        if self.browser.selected.contains(&item.key) {
+                            self.browser.selected.remove(&item.key);
+                        } else {
+                            self.browser.selected.insert(item.key.clone());
+                        }
                     }
                 }
             }
             Action::InputChar('a') => {
-                self.browser
-                    .selected
-                    .extend(self.browser.items.iter().map(|i| i.name.clone()));
+                self.browser.selected.extend(
+                    self.browser
+                        .items
+                        .iter()
+                        .filter(|item| item_is_selectable(item))
+                        .map(|item| item.key.clone()),
+                );
             }
             Action::InputChar('x') => {
                 self.browser.selected.clear();
@@ -309,11 +329,8 @@ impl App {
                     }
                 }
             }
-            Action::MoveLeft
-            | Action::MoveRight
-            | Action::Enter
-            | Action::CancelDialog
-            | Action::InputChar(_) => {}
+            Action::MoveLeft | Action::MoveRight | Action::CancelDialog | Action::InputChar(_) => {}
+            Action::Enter => self.handle_enter(),
         }
     }
 
@@ -415,6 +432,13 @@ impl App {
         let draft_prefix = normalize_prefix(self.ui.connection_draft.prefix.trim());
         let draft_endpoint = self.ui.connection_draft.endpoint_url.trim().to_string();
         let (target, warning) = resolve_target(&draft_profile, &draft_endpoint);
+        let connection_target_changed =
+            self.session.profile != draft_profile || self.session.endpoint_url != draft_endpoint;
+        let effective_prefix = if connection_target_changed {
+            "/".to_string()
+        } else {
+            draft_prefix
+        };
 
         if let S3Target::Endpoint { endpoint_url } = &target {
             if let Err(err) = validate_endpoint_url(endpoint_url) {
@@ -432,7 +456,7 @@ impl App {
             profile: draft_profile.clone(),
             region: draft_region.clone(),
             bucket: draft_bucket.clone(),
-            prefix: draft_prefix.clone(),
+            prefix: effective_prefix.clone(),
             endpoint_url: draft_endpoint.clone(),
             max_keys: 200,
         };
@@ -451,7 +475,7 @@ impl App {
         self.session.profile = draft_profile;
         self.session.region = draft_region;
         self.session.bucket = draft_bucket;
-        self.session.path = draft_prefix;
+        self.session.path = effective_prefix;
         self.session.endpoint_url = draft_endpoint;
         self.session.mode = "Browse".to_string();
         self.browser.warning = None;
@@ -478,6 +502,10 @@ impl App {
             self.logs
                 .push("WARN endpoint-url ignored because profile takes precedence".to_string());
         }
+        if connection_target_changed {
+            self.logs
+                .push("INFO profile/endpoint changed; browser reset to root prefix".to_string());
+        }
 
         self.ui.connection_draft.error = None;
         self.ui.show_connection_settings = false;
@@ -499,7 +527,12 @@ impl App {
     }
 
     fn queue_download_folder(&mut self) {
-        self.queue.total_files = self.browser.items.len() as u64;
+        self.queue.total_files = self
+            .browser
+            .items
+            .iter()
+            .filter(|item| item_is_selectable(item))
+            .count() as u64;
         self.queue.total_bytes = self.queue.total_files * 1024 * 1024;
         self.queue.done_files = 0;
         self.queue.done_bytes = 0;
@@ -525,6 +558,7 @@ impl App {
                 self.browser.items = self.build_browser_items(&listing);
                 self.browser.cursor = 0;
                 self.browser.warning = None;
+                self.browser.selected.clear();
                 self.logs.push(format!(
                     "INFO refreshed S3 listing target={}",
                     self.display_effective_target()
@@ -542,9 +576,22 @@ impl App {
         let base_prefix = api_prefix_from_path(&self.session.path);
         let mut items = Vec::new();
 
+        if self.session.path != "/" {
+            items.push(BrowserItem {
+                kind: BrowserItemKind::Parent,
+                is_dir: true,
+                key: parent_prefix(&self.session.path),
+                name: "[..]".to_string(),
+                size: None,
+                modified: "-".to_string(),
+            });
+        }
+
         for prefix in &listing.prefixes {
             items.push(BrowserItem {
+                kind: BrowserItemKind::Dir,
                 is_dir: true,
+                key: prefix.clone(),
                 name: display_key(prefix, base_prefix.as_deref()),
                 size: None,
                 modified: "-".to_string(),
@@ -553,7 +600,9 @@ impl App {
 
         for object in &listing.objects {
             items.push(BrowserItem {
+                kind: BrowserItemKind::Obj,
                 is_dir: false,
+                key: object.key.clone(),
                 name: display_key(&object.key, base_prefix.as_deref()),
                 size: Some(object.size),
                 modified: object.modified.clone(),
@@ -567,6 +616,63 @@ impl App {
         self.logs.push(format!("WARN {headline}"));
         for line in detail.lines() {
             self.logs.push(format!("WARN {line}"));
+        }
+    }
+
+    fn handle_enter(&mut self) {
+        let Some(item) = self.browser.items.get(self.browser.cursor) else {
+            return;
+        };
+        match item.kind {
+            BrowserItemKind::Parent => self.navigate_to_prefix(item.key.clone(), "parent"),
+            BrowserItemKind::Dir => {
+                self.navigate_to_prefix(normalize_prefix(&item.key), "open-dir")
+            }
+            BrowserItemKind::Obj => {
+                self.ui.tab = WorkTab::Preview;
+                self.logs
+                    .push(format!("INFO open object preview key={}", item.key));
+            }
+        }
+    }
+
+    fn go_parent_prefix(&mut self) {
+        if self.session.path == "/" {
+            self.logs.push("INFO already at root prefix".to_string());
+            return;
+        }
+        self.navigate_to_prefix(parent_prefix(&self.session.path), "parent");
+    }
+
+    fn navigate_to_prefix(&mut self, prefix: String, reason: &str) {
+        let params = S3ConnectParams {
+            profile: self.session.profile.clone(),
+            region: self.session.region.clone(),
+            bucket: self.session.bucket.clone(),
+            prefix: prefix.clone(),
+            endpoint_url: self.session.endpoint_url.clone(),
+            max_keys: 200,
+        };
+
+        match list_objects_sync(&params) {
+            Ok(listing) => {
+                self.session.path = normalize_prefix(&prefix);
+                self.browser.items = self.build_browser_items(&listing);
+                self.browser.cursor = 0;
+                self.browser.warning = None;
+                self.browser.selected.clear();
+                self.logs.push(format!(
+                    "INFO navigated reason={} prefix={} target={}",
+                    reason,
+                    self.session.path,
+                    self.display_effective_target()
+                ));
+            }
+            Err(err) => {
+                self.browser.warning =
+                    Some("S3 navigation failed. See Logs tab for details.".to_string());
+                self.push_warn_multiline("S3 navigation failed", &err);
+            }
         }
     }
 }
@@ -601,4 +707,22 @@ fn display_key(key: &str, base_prefix: Option<&str>) -> String {
             .map_or_else(|| key.to_string(), ToString::to_string),
         None => key.to_string(),
     }
+}
+
+fn parent_prefix(path: &str) -> String {
+    let normalized = normalize_prefix(path);
+    if normalized == "/" {
+        return normalized;
+    }
+    let trimmed = normalized.trim_end_matches('/');
+    let parent = trimmed.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+    if parent.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{parent}/")
+    }
+}
+
+fn item_is_selectable(item: &BrowserItem) -> bool {
+    !matches!(item.kind, BrowserItemKind::Parent)
 }
