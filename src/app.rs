@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use crate::action::{Action, Focus, WorkTab};
+use crate::services::config::AppConfig;
 use crate::services::s3::{
-    list_objects_sync, resolve_target, validate_endpoint_url, S3ConnectParams, S3ListResult,
-    S3Target, TargetWarning,
+    download_object_to_path_sync, list_all_objects_sync, list_objects_sync, resolve_target,
+    validate_endpoint_url, S3ConnectParams, S3ListResult, S3ObjectSummary, S3Target, TargetWarning,
 };
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,25 @@ pub struct QueueState {
     pub total_bytes: u64,
     pub speed_mbps: f64,
     pub eta: String,
+    pub jobs: Vec<QueueJob>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum QueueJobStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueJob {
+    pub key: String,
+    pub local_path: PathBuf,
+    pub size: u64,
+    pub status: QueueJobStatus,
+    pub attempts: u8,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +149,8 @@ pub struct App {
     pub script: ScriptState,
     pub ui: UiState,
     pub logs: Vec<String>,
+    pub max_retries: u8,
+    pub download_root: PathBuf,
 }
 
 impl App {
@@ -183,6 +206,7 @@ impl App {
                 total_bytes: 0,
                 speed_mbps: 0.0,
                 eta: "--:--".to_string(),
+                jobs: Vec::new(),
             },
             script: ScriptState {
                 command: "./post-process.sh".to_string(),
@@ -205,6 +229,8 @@ impl App {
                 },
             },
             logs: vec!["INFO app initialized".to_string()],
+            max_retries: AppConfig::default().max_retries,
+            download_root: PathBuf::from(AppConfig::default().download_dir),
             session,
         }
     }
@@ -318,16 +344,7 @@ impl App {
                     .push("INFO filter input not yet implemented".to_string());
             }
             Action::Tick => {
-                if self.queue.done_files < self.queue.total_files {
-                    self.queue.done_files += 1;
-                    self.queue.done_bytes =
-                        (self.queue.done_files * 1024 * 1024).min(self.queue.total_bytes);
-                    self.queue.speed_mbps = 12.5;
-                    if self.queue.done_files == self.queue.total_files {
-                        self.session.mode = "Browse".to_string();
-                        self.logs.push("INFO download queue completed".to_string());
-                    }
-                }
+                self.process_queue_tick();
             }
             Action::MoveLeft | Action::MoveRight | Action::CancelDialog | Action::InputChar(_) => {}
             Action::Enter => self.handle_enter(),
@@ -512,35 +529,191 @@ impl App {
     }
 
     fn queue_download_selected(&mut self) {
-        let selected_count = self.browser.selected.len() as u64;
-        if selected_count > 0 {
-            self.queue.total_files = selected_count;
-            self.queue.total_bytes = selected_count * 1024 * 1024;
-            self.queue.done_files = 0;
-            self.queue.done_bytes = 0;
-            self.session.mode = "Download".to_string();
-            self.logs.push(format!(
-                "INFO queued {} selected item(s) for download",
-                selected_count
-            ));
+        match self.resolve_selected_objects() {
+            Ok(objects) => {
+                self.prepare_download_queue(objects);
+                self.logs.push(format!(
+                    "INFO queued {} selected object(s) for download",
+                    self.queue.total_files
+                ));
+            }
+            Err(err) => {
+                self.browser.warning =
+                    Some("Failed to resolve selected objects. See Logs tab.".to_string());
+                self.push_warn_multiline("resolve selected objects failed", &err);
+            }
+        }
+    }
+
+    fn process_queue_tick(&mut self) {
+        if self.queue.jobs.is_empty() {
+            return;
+        }
+
+        let Some(index) = self
+            .queue
+            .jobs
+            .iter()
+            .position(|job| job.status == QueueJobStatus::Pending)
+        else {
+            if self
+                .queue
+                .jobs
+                .iter()
+                .all(|job| matches!(job.status, QueueJobStatus::Done | QueueJobStatus::Failed))
+                && self.session.mode == "Download"
+            {
+                self.session.mode = "Browse".to_string();
+                self.logs.push("INFO download queue completed".to_string());
+            }
+            return;
+        };
+
+        let key = self.queue.jobs[index].key.clone();
+        let path = self.queue.jobs[index].local_path.clone();
+        let attempt = self.queue.jobs[index].attempts.saturating_add(1);
+        self.queue.jobs[index].attempts = attempt;
+        self.queue.jobs[index].status = QueueJobStatus::Running;
+        self.logs.push(format!(
+            "INFO downloading key={} attempt={}/{}",
+            key, attempt, self.max_retries
+        ));
+
+        let params = S3ConnectParams {
+            profile: self.session.profile.clone(),
+            region: self.session.region.clone(),
+            bucket: self.session.bucket.clone(),
+            prefix: self.session.path.clone(),
+            endpoint_url: self.session.endpoint_url.clone(),
+            max_keys: 200,
+        };
+
+        match download_object_to_path_sync(&params, &key, &path) {
+            Ok(result) => {
+                self.queue.jobs[index].status = QueueJobStatus::Done;
+                self.queue.jobs[index].error = None;
+                self.queue.done_files += 1;
+                self.queue.done_bytes += result.bytes_written;
+                self.logs.push(format!(
+                    "INFO download complete key={} bytes={} path={}",
+                    key,
+                    result.bytes_written,
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                let attempts = self.queue.jobs[index].attempts;
+                if attempts < self.max_retries {
+                    self.queue.jobs[index].status = QueueJobStatus::Pending;
+                    self.queue.jobs[index].error = Some(err.clone());
+                    self.logs.push(format!(
+                        "WARN download failed key={} attempt={}/{} retrying",
+                        key, attempts, self.max_retries
+                    ));
+                    self.push_warn_multiline("download attempt failed", &err);
+                } else {
+                    self.queue.jobs[index].status = QueueJobStatus::Failed;
+                    self.queue.jobs[index].error = Some(err.clone());
+                    self.queue.done_files += 1;
+                    self.logs.push(format!(
+                        "WARN download failed permanently key={} attempts={}",
+                        key, attempts
+                    ));
+                    self.push_warn_multiline("download failed permanently", &err);
+                }
+            }
         }
     }
 
     fn queue_download_folder(&mut self) {
-        self.queue.total_files = self
-            .browser
-            .items
-            .iter()
-            .filter(|item| item_is_selectable(item))
-            .count() as u64;
-        self.queue.total_bytes = self.queue.total_files * 1024 * 1024;
+        let params = S3ConnectParams {
+            profile: self.session.profile.clone(),
+            region: self.session.region.clone(),
+            bucket: self.session.bucket.clone(),
+            prefix: self.session.path.clone(),
+            endpoint_url: self.session.endpoint_url.clone(),
+            max_keys: 1000,
+        };
+        match list_all_objects_sync(&params) {
+            Ok(objects) => {
+                self.prepare_download_queue(objects);
+                self.logs.push(format!(
+                    "INFO queued folder prefix {} with {} object(s)",
+                    self.session.path, self.queue.total_files
+                ));
+            }
+            Err(err) => {
+                self.browser.warning =
+                    Some("Failed to queue folder download. See Logs tab.".to_string());
+                self.push_warn_multiline("queue folder download failed", &err);
+            }
+        }
+    }
+
+    fn resolve_selected_objects(&self) -> Result<Vec<S3ObjectSummary>, String> {
+        let mut out = Vec::<S3ObjectSummary>::new();
+        let mut seen = BTreeSet::<String>::new();
+
+        for key in &self.browser.selected {
+            if key.ends_with('/') {
+                let params = S3ConnectParams {
+                    profile: self.session.profile.clone(),
+                    region: self.session.region.clone(),
+                    bucket: self.session.bucket.clone(),
+                    prefix: normalize_prefix(key),
+                    endpoint_url: self.session.endpoint_url.clone(),
+                    max_keys: 1000,
+                };
+                let expanded = list_all_objects_sync(&params)?;
+                for obj in expanded {
+                    if seen.insert(obj.key.clone()) {
+                        out.push(obj);
+                    }
+                }
+            } else if seen.insert(key.clone()) {
+                let known_size = self
+                    .browser
+                    .items
+                    .iter()
+                    .find(|item| item.key == *key)
+                    .and_then(|item| item.size)
+                    .unwrap_or(0);
+                out.push(S3ObjectSummary {
+                    key: key.clone(),
+                    size: known_size,
+                    modified: "-".to_string(),
+                });
+            }
+        }
+
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
+    }
+
+    fn prepare_download_queue(&mut self, objects: Vec<S3ObjectSummary>) {
+        self.queue.jobs = objects
+            .into_iter()
+            .map(|obj| QueueJob {
+                local_path: local_destination_for_key(&self.download_root, &obj.key),
+                key: obj.key,
+                size: obj.size,
+                status: QueueJobStatus::Pending,
+                attempts: 0,
+                error: None,
+            })
+            .collect();
+
+        self.queue.total_files = self.queue.jobs.len() as u64;
+        self.queue.total_bytes = self.queue.jobs.iter().map(|job| job.size).sum();
         self.queue.done_files = 0;
         self.queue.done_bytes = 0;
-        self.session.mode = "Download".to_string();
-        self.logs.push(format!(
-            "INFO queued current folder with {} item(s)",
-            self.queue.total_files
-        ));
+        self.queue.speed_mbps = 0.0;
+        self.queue.eta = "--:--".to_string();
+        self.session.mode = if self.queue.total_files > 0 {
+            "Download".to_string()
+        } else {
+            "Browse".to_string()
+        };
     }
 
     fn reload_current_listing(&mut self) {
@@ -725,4 +898,9 @@ fn parent_prefix(path: &str) -> String {
 
 fn item_is_selectable(item: &BrowserItem) -> bool {
     !matches!(item.kind, BrowserItemKind::Parent)
+}
+
+fn local_destination_for_key(root: &Path, key: &str) -> PathBuf {
+    let sanitized = key.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str());
+    root.join(sanitized)
 }
