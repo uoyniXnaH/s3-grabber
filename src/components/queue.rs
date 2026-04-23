@@ -9,6 +9,7 @@ use ratatui::{
 use crate::app::{App, QueueJobStatus};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let (pending, running, done, failed) = app.queue_status_counts();
     let mut lines = vec![
         Line::from(format!(
             "Files: {}/{}",
@@ -20,6 +21,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(format!("Speed: {:.1} MB/s", app.queue.speed_mbps)),
         Line::from(format!("ETA: {}", app.queue.eta)),
+        Line::from(format!(
+            "Jobs: pending={} running={} done={} failed={}",
+            pending, running, done, failed
+        )),
+        Line::from(app.queue.summary.clone()),
         Line::from(""),
     ];
 

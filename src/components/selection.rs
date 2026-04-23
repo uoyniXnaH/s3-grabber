@@ -14,6 +14,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         "Selected items: {}",
         app.selected_count()
     )));
+    lines.push(Line::from(format!(
+        "Objects: {}  Prefixes: {}",
+        app.selected_object_count(),
+        app.selected_prefix_count()
+    )));
     lines.push(Line::from(""));
 
     if app.browser.selected.is_empty() {

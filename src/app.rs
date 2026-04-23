@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::action::{Action, Focus, WorkTab};
@@ -51,6 +51,7 @@ pub struct QueueState {
     pub total_bytes: u64,
     pub speed_mbps: f64,
     pub eta: String,
+    pub summary: String,
     pub jobs: Vec<QueueJob>,
 }
 
@@ -206,6 +207,7 @@ impl App {
                 total_bytes: 0,
                 speed_mbps: 0.0,
                 eta: "--:--".to_string(),
+                summary: "No queue prepared. Use d (selected) or D (folder).".to_string(),
                 jobs: Vec::new(),
             },
             script: ScriptState {
@@ -353,6 +355,51 @@ impl App {
 
     pub fn selected_count(&self) -> usize {
         self.browser.selected.len()
+    }
+
+    pub fn selected_prefix_count(&self) -> usize {
+        self.browser
+            .selected
+            .iter()
+            .filter(|key| key.ends_with('/'))
+            .count()
+    }
+
+    pub fn selected_object_count(&self) -> usize {
+        self.browser
+            .selected
+            .iter()
+            .filter(|key| !key.ends_with('/'))
+            .count()
+    }
+
+    pub fn queue_status_counts(&self) -> (usize, usize, usize, usize) {
+        let pending = self
+            .queue
+            .jobs
+            .iter()
+            .filter(|job| job.status == QueueJobStatus::Pending)
+            .count();
+        let running = self
+            .queue
+            .jobs
+            .iter()
+            .filter(|job| job.status == QueueJobStatus::Running)
+            .count();
+        let done = self
+            .queue
+            .jobs
+            .iter()
+            .filter(|job| job.status == QueueJobStatus::Done)
+            .count();
+        let failed = self
+            .queue
+            .jobs
+            .iter()
+            .filter(|job| job.status == QueueJobStatus::Failed)
+            .count();
+
+        (pending, running, done, failed)
     }
 
     pub fn display_profile(&self) -> &str {
@@ -504,6 +551,7 @@ impl App {
         self.queue.total_files = 0;
         self.queue.done_bytes = 0;
         self.queue.total_bytes = 0;
+        self.queue.summary = "No queue prepared. Use d (selected) or D (folder).".to_string();
 
         let target_msg = match target {
             S3Target::Profile { profile } => format!("aws-profile:{profile}"),
@@ -529,11 +577,35 @@ impl App {
     }
 
     fn queue_download_selected(&mut self) {
+        if self.browser.selected.is_empty() {
+            self.browser.warning =
+                Some("No selection to queue. Select objects or folders first.".to_string());
+            self.logs
+                .push("WARN queue requested with empty selection".to_string());
+            return;
+        }
+
         match self.resolve_selected_objects() {
-            Ok(objects) => {
-                self.prepare_download_queue(objects);
+            Ok(resolution) => {
+                self.prepare_download_queue(resolution.objects);
+                self.queue.summary = format!(
+                    "Plan: selected {} objects + {} prefixes -> {} effective prefixes + {} direct objects (skipped {} overlap prefixes, {} covered objects) => {} queued",
+                    resolution.stats.selected_object_count,
+                    resolution.stats.selected_prefix_count,
+                    resolution.stats.effective_prefix_count,
+                    resolution.stats.effective_direct_object_count,
+                    resolution.stats.overlapping_prefixes_skipped,
+                    resolution.stats.covered_objects_skipped,
+                    self.queue.total_files
+                );
                 self.logs.push(format!(
-                    "INFO queued {} selected object(s) for download",
+                    "INFO queue summary selected(objects={}, prefixes={}) effective(prefixes={}, direct_objects={}) skipped(overlap_prefixes={}, covered_objects={}) final_objects={}",
+                    resolution.stats.selected_object_count,
+                    resolution.stats.selected_prefix_count,
+                    resolution.stats.effective_prefix_count,
+                    resolution.stats.effective_direct_object_count,
+                    resolution.stats.overlapping_prefixes_skipped,
+                    resolution.stats.covered_objects_skipped,
                     self.queue.total_files
                 ));
             }
@@ -637,6 +709,10 @@ impl App {
         match list_all_objects_sync(&params) {
             Ok(objects) => {
                 self.prepare_download_queue(objects);
+                self.queue.summary = format!(
+                    "Plan: full folder prefix {} => {} queued object(s)",
+                    self.session.path, self.queue.total_files
+                );
                 self.logs.push(format!(
                     "INFO queued folder prefix {} with {} object(s)",
                     self.session.path, self.queue.total_files
@@ -650,48 +726,74 @@ impl App {
         }
     }
 
-    fn resolve_selected_objects(&self) -> Result<Vec<S3ObjectSummary>, String> {
-        let mut out = Vec::<S3ObjectSummary>::new();
-        let mut seen = BTreeSet::<String>::new();
+    fn resolve_selected_objects(&self) -> Result<SelectionResolution, String> {
+        let plan = SelectionPlan::from_selected(&self.browser.selected);
+        let mut by_key = BTreeMap::<String, S3ObjectSummary>::new();
 
-        for key in &self.browser.selected {
-            if key.ends_with('/') {
-                let params = S3ConnectParams {
-                    profile: self.session.profile.clone(),
-                    region: self.session.region.clone(),
-                    bucket: self.session.bucket.clone(),
-                    prefix: normalize_prefix(key),
-                    endpoint_url: self.session.endpoint_url.clone(),
-                    max_keys: 1000,
-                };
-                let expanded = list_all_objects_sync(&params)?;
-                for obj in expanded {
-                    if seen.insert(obj.key.clone()) {
-                        out.push(obj);
-                    }
-                }
-            } else if seen.insert(key.clone()) {
-                let known_size = self
-                    .browser
-                    .items
-                    .iter()
-                    .find(|item| item.key == *key)
-                    .and_then(|item| item.size)
-                    .unwrap_or(0);
-                out.push(S3ObjectSummary {
+        for prefix in &plan.effective_prefixes {
+            let params = S3ConnectParams {
+                profile: self.session.profile.clone(),
+                region: self.session.region.clone(),
+                bucket: self.session.bucket.clone(),
+                prefix: normalize_prefix(prefix),
+                endpoint_url: self.session.endpoint_url.clone(),
+                max_keys: 1000,
+            };
+            let expanded = list_all_objects_sync(&params)?;
+            for obj in expanded {
+                by_key.entry(obj.key.clone()).or_insert(obj);
+            }
+        }
+
+        for key in &plan.effective_object_keys {
+            let known_size = self
+                .browser
+                .items
+                .iter()
+                .find(|item| item.key == *key)
+                .and_then(|item| item.size)
+                .unwrap_or(0);
+
+            by_key
+                .entry(key.clone())
+                .or_insert_with(|| S3ObjectSummary {
                     key: key.clone(),
                     size: known_size,
                     modified: "-".to_string(),
                 });
-            }
         }
 
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(out)
+        Ok(SelectionResolution {
+            objects: by_key.into_values().collect(),
+            stats: SelectionResolutionStats {
+                selected_prefix_count: plan.selected_prefix_count,
+                selected_object_count: plan.selected_object_count,
+                effective_prefix_count: plan.effective_prefixes.len(),
+                effective_direct_object_count: plan.effective_object_keys.len(),
+                overlapping_prefixes_skipped: plan.overlapping_prefixes_skipped,
+                covered_objects_skipped: plan.covered_objects_skipped,
+            },
+        })
     }
 
     fn prepare_download_queue(&mut self, objects: Vec<S3ObjectSummary>) {
-        self.queue.jobs = objects
+        let mut deduped = BTreeMap::<String, S3ObjectSummary>::new();
+        for obj in objects {
+            deduped
+                .entry(obj.key.clone())
+                .and_modify(|existing| {
+                    if obj.size > existing.size {
+                        existing.size = obj.size;
+                    }
+                    if existing.modified == "-" && obj.modified != "-" {
+                        existing.modified = obj.modified.clone();
+                    }
+                })
+                .or_insert(obj);
+        }
+
+        self.queue.jobs = deduped
+            .into_values()
             .into_iter()
             .map(|obj| QueueJob {
                 local_path: local_destination_for_key(&self.download_root, &obj.key),
@@ -903,4 +1005,85 @@ fn item_is_selectable(item: &BrowserItem) -> bool {
 fn local_destination_for_key(root: &Path, key: &str) -> PathBuf {
     let sanitized = key.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str());
     root.join(sanitized)
+}
+
+#[derive(Debug)]
+struct SelectionResolution {
+    objects: Vec<S3ObjectSummary>,
+    stats: SelectionResolutionStats,
+}
+
+#[derive(Debug)]
+struct SelectionResolutionStats {
+    selected_prefix_count: usize,
+    selected_object_count: usize,
+    effective_prefix_count: usize,
+    effective_direct_object_count: usize,
+    overlapping_prefixes_skipped: usize,
+    covered_objects_skipped: usize,
+}
+
+#[derive(Debug)]
+struct SelectionPlan {
+    selected_prefix_count: usize,
+    selected_object_count: usize,
+    effective_prefixes: Vec<String>,
+    effective_object_keys: Vec<String>,
+    overlapping_prefixes_skipped: usize,
+    covered_objects_skipped: usize,
+}
+
+impl SelectionPlan {
+    fn from_selected(selected: &BTreeSet<String>) -> Self {
+        let mut prefixes = selected
+            .iter()
+            .filter(|key| key.ends_with('/'))
+            .cloned()
+            .collect::<Vec<_>>();
+        prefixes.sort();
+        let selected_prefix_count = prefixes.len();
+
+        let mut effective_prefixes = Vec::<String>::new();
+        let mut overlapping_prefixes_skipped = 0usize;
+        for prefix in prefixes {
+            if effective_prefixes
+                .iter()
+                .any(|existing| prefix.starts_with(existing))
+            {
+                overlapping_prefixes_skipped += 1;
+            } else {
+                effective_prefixes.push(prefix);
+            }
+        }
+
+        let mut object_keys = selected
+            .iter()
+            .filter(|key| !key.ends_with('/'))
+            .cloned()
+            .collect::<Vec<_>>();
+        object_keys.sort();
+        let selected_object_count = object_keys.len();
+
+        let mut effective_object_keys = Vec::new();
+        let mut covered_objects_skipped = 0usize;
+        for key in object_keys {
+            if effective_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            {
+                covered_objects_skipped += 1;
+            } else {
+                effective_object_keys.push(key);
+            }
+        }
+
+        Self {
+            selected_prefix_count,
+            selected_object_count,
+            effective_prefixes,
+            effective_object_keys,
+            overlapping_prefixes_skipped,
+            covered_objects_skipped,
+        }
+    }
 }
