@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::action::{Action, Focus, WorkTab};
 use crate::services::config::AppConfig;
@@ -52,6 +53,7 @@ pub struct QueueState {
     pub speed_mbps: f64,
     pub eta: String,
     pub summary: String,
+    pub started_at: Option<Instant>,
     pub jobs: Vec<QueueJob>,
 }
 
@@ -151,6 +153,7 @@ pub struct App {
     pub ui: UiState,
     pub logs: Vec<String>,
     pub max_retries: u8,
+    pub download_concurrency: usize,
     pub download_root: PathBuf,
 }
 
@@ -208,6 +211,7 @@ impl App {
                 speed_mbps: 0.0,
                 eta: "--:--".to_string(),
                 summary: "No queue prepared. Use d (selected) or D (folder).".to_string(),
+                started_at: None,
                 jobs: Vec::new(),
             },
             script: ScriptState {
@@ -232,6 +236,7 @@ impl App {
             },
             logs: vec!["INFO app initialized".to_string()],
             max_retries: AppConfig::default().max_retries,
+            download_concurrency: AppConfig::default().concurrency.max(1),
             download_root: PathBuf::from(AppConfig::default().download_dir),
             session,
         }
@@ -551,6 +556,9 @@ impl App {
         self.queue.total_files = 0;
         self.queue.done_bytes = 0;
         self.queue.total_bytes = 0;
+        self.queue.speed_mbps = 0.0;
+        self.queue.eta = "--:--".to_string();
+        self.queue.started_at = None;
         self.queue.summary = "No queue prepared. Use d (selected) or D (folder).".to_string();
 
         let target_msg = match target {
@@ -622,12 +630,34 @@ impl App {
             return;
         }
 
-        let Some(index) = self
+        if self.queue.started_at.is_none() {
+            self.queue.started_at = Some(Instant::now());
+        }
+
+        let running = self
             .queue
             .jobs
             .iter()
-            .position(|job| job.status == QueueJobStatus::Pending)
-        else {
+            .filter(|job| job.status == QueueJobStatus::Running)
+            .count();
+        let slots = self.download_concurrency.saturating_sub(running);
+        if slots == 0 {
+            self.update_transfer_metrics();
+            return;
+        }
+
+        let pending_indices = self
+            .queue
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| job.status == QueueJobStatus::Pending)
+            .map(|(index, _)| index)
+            .take(slots)
+            .collect::<Vec<_>>();
+
+        if pending_indices.is_empty() {
+            self.update_transfer_metrics();
             if self
                 .queue
                 .jobs
@@ -639,17 +669,21 @@ impl App {
                 self.logs.push("INFO download queue completed".to_string());
             }
             return;
-        };
+        }
 
-        let key = self.queue.jobs[index].key.clone();
-        let path = self.queue.jobs[index].local_path.clone();
-        let attempt = self.queue.jobs[index].attempts.saturating_add(1);
-        self.queue.jobs[index].attempts = attempt;
-        self.queue.jobs[index].status = QueueJobStatus::Running;
-        self.logs.push(format!(
-            "INFO downloading key={} attempt={}/{}",
-            key, attempt, self.max_retries
-        ));
+        let mut batch = Vec::with_capacity(pending_indices.len());
+        for index in pending_indices {
+            let key = self.queue.jobs[index].key.clone();
+            let path = self.queue.jobs[index].local_path.clone();
+            let attempt = self.queue.jobs[index].attempts.saturating_add(1);
+            self.queue.jobs[index].attempts = attempt;
+            self.queue.jobs[index].status = QueueJobStatus::Running;
+            self.logs.push(format!(
+                "INFO downloading key={} attempt={}/{}",
+                key, attempt, self.max_retries
+            ));
+            batch.push((index, key, path));
+        }
 
         let params = S3ConnectParams {
             profile: self.session.profile.clone(),
@@ -660,40 +694,76 @@ impl App {
             max_keys: 200,
         };
 
-        match download_object_to_path_sync(&params, &key, &path) {
-            Ok(result) => {
-                self.queue.jobs[index].status = QueueJobStatus::Done;
-                self.queue.jobs[index].error = None;
-                self.queue.done_files += 1;
-                self.queue.done_bytes += result.bytes_written;
-                self.logs.push(format!(
-                    "INFO download complete key={} bytes={} path={}",
-                    key,
-                    result.bytes_written,
-                    path.display()
-                ));
+        let mut results = Vec::with_capacity(batch.len());
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(batch.len());
+            for (index, key, path) in batch {
+                let params = params.clone();
+                handles.push(scope.spawn(move || {
+                    let result = std::panic::catch_unwind(|| {
+                        download_object_to_path_sync(&params, &key, &path)
+                    })
+                    .unwrap_or_else(|_| Err("download worker panicked".to_string()));
+                    (index, key, path, result)
+                }));
             }
-            Err(err) => {
-                let attempts = self.queue.jobs[index].attempts;
-                if attempts < self.max_retries {
-                    self.queue.jobs[index].status = QueueJobStatus::Pending;
-                    self.queue.jobs[index].error = Some(err.clone());
-                    self.logs.push(format!(
-                        "WARN download failed key={} attempt={}/{} retrying",
-                        key, attempts, self.max_retries
-                    ));
-                    self.push_warn_multiline("download attempt failed", &err);
-                } else {
-                    self.queue.jobs[index].status = QueueJobStatus::Failed;
-                    self.queue.jobs[index].error = Some(err.clone());
-                    self.queue.done_files += 1;
-                    self.logs.push(format!(
-                        "WARN download failed permanently key={} attempts={}",
-                        key, attempts
-                    ));
-                    self.push_warn_multiline("download failed permanently", &err);
+
+            for handle in handles {
+                if let Ok(result) = handle.join() {
+                    results.push(result);
                 }
             }
+        });
+
+        for (index, key, path, result) in results {
+            match result {
+                Ok(download) => {
+                    self.queue.jobs[index].status = QueueJobStatus::Done;
+                    self.queue.jobs[index].error = None;
+                    self.queue.done_files += 1;
+                    self.queue.done_bytes += download.bytes_written;
+                    self.logs.push(format!(
+                        "INFO download complete key={} bytes={} path={}",
+                        key,
+                        download.bytes_written,
+                        path.display()
+                    ));
+                }
+                Err(err) => {
+                    let attempts = self.queue.jobs[index].attempts;
+                    if attempts < self.max_retries {
+                        self.queue.jobs[index].status = QueueJobStatus::Pending;
+                        self.queue.jobs[index].error = Some(err.clone());
+                        self.logs.push(format!(
+                            "WARN download failed key={} attempt={}/{} retrying",
+                            key, attempts, self.max_retries
+                        ));
+                        self.push_warn_multiline("download attempt failed", &err);
+                    } else {
+                        self.queue.jobs[index].status = QueueJobStatus::Failed;
+                        self.queue.jobs[index].error = Some(err.clone());
+                        self.queue.done_files += 1;
+                        self.logs.push(format!(
+                            "WARN download failed permanently key={} attempts={}",
+                            key, attempts
+                        ));
+                        self.push_warn_multiline("download failed permanently", &err);
+                    }
+                }
+            }
+        }
+
+        self.update_transfer_metrics();
+        if self
+            .queue
+            .jobs
+            .iter()
+            .all(|job| matches!(job.status, QueueJobStatus::Done | QueueJobStatus::Failed))
+            && self.session.mode == "Download"
+        {
+            self.queue.eta = "00:00".to_string();
+            self.session.mode = "Browse".to_string();
+            self.logs.push("INFO download queue completed".to_string());
         }
     }
 
@@ -810,11 +880,58 @@ impl App {
         self.queue.done_files = 0;
         self.queue.done_bytes = 0;
         self.queue.speed_mbps = 0.0;
-        self.queue.eta = "--:--".to_string();
+        self.queue.eta = if self.queue.total_files > 0 {
+            "calculating".to_string()
+        } else {
+            "--:--".to_string()
+        };
+        self.queue.started_at = if self.queue.total_files > 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.session.mode = if self.queue.total_files > 0 {
             "Download".to_string()
         } else {
             "Browse".to_string()
+        };
+    }
+
+    fn update_transfer_metrics(&mut self) {
+        let Some(started_at) = self.queue.started_at else {
+            self.queue.speed_mbps = 0.0;
+            self.queue.eta = "--:--".to_string();
+            return;
+        };
+
+        let elapsed = started_at.elapsed().as_secs_f64();
+        if elapsed <= f64::EPSILON {
+            self.queue.speed_mbps = 0.0;
+            self.queue.eta = "calculating".to_string();
+            return;
+        }
+
+        let bytes_per_second = self.queue.done_bytes as f64 / elapsed;
+        self.queue.speed_mbps = bytes_per_second / (1024.0 * 1024.0);
+        let remaining_bytes = self
+            .queue
+            .jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    QueueJobStatus::Pending | QueueJobStatus::Running
+                )
+            })
+            .map(|job| job.size)
+            .sum::<u64>();
+
+        self.queue.eta = if remaining_bytes == 0 {
+            "00:00".to_string()
+        } else if bytes_per_second <= f64::EPSILON {
+            "calculating".to_string()
+        } else {
+            format_eta((remaining_bytes as f64 / bytes_per_second).ceil() as u64)
         };
     }
 
@@ -1005,6 +1122,17 @@ fn item_is_selectable(item: &BrowserItem) -> bool {
 fn local_destination_for_key(root: &Path, key: &str) -> PathBuf {
     let sanitized = key.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str());
     root.join(sanitized)
+}
+
+fn format_eta(total_seconds: u64) -> String {
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 #[derive(Debug)]
@@ -1235,5 +1363,26 @@ mod tests {
             .warning
             .as_deref()
             .is_some_and(|w| w.contains("No selection to queue")));
+    }
+
+    #[test]
+    fn prepare_download_queue_sets_started_state() {
+        let mut app = App::new();
+        app.prepare_download_queue(vec![S3ObjectSummary {
+            key: "a/file.txt".to_string(),
+            size: 10,
+            modified: "-".to_string(),
+        }]);
+
+        assert!(app.queue.started_at.is_some());
+        assert_eq!(app.queue.eta, "calculating");
+        assert_eq!(app.session.mode, "Download");
+    }
+
+    #[test]
+    fn format_eta_formats_mm_ss_and_hh_mm_ss() {
+        assert_eq!(format_eta(5), "00:05");
+        assert_eq!(format_eta(125), "02:05");
+        assert_eq!(format_eta(3_726), "01:02:06");
     }
 }
