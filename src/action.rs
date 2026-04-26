@@ -7,7 +7,7 @@ pub enum Focus {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WorkTab {
     Selection,
-    Preview,
+    Details,
     Queue,
     Logs,
 }
@@ -15,7 +15,7 @@ pub enum WorkTab {
 impl WorkTab {
     pub const ALL: [WorkTab; 4] = [
         WorkTab::Selection,
-        WorkTab::Preview,
+        WorkTab::Details,
         WorkTab::Queue,
         WorkTab::Logs,
     ];
@@ -23,7 +23,7 @@ impl WorkTab {
     pub fn label(self) -> &'static str {
         match self {
             WorkTab::Selection => "Selection",
-            WorkTab::Preview => "Preview",
+            WorkTab::Details => "Details",
             WorkTab::Queue => "Queue",
             WorkTab::Logs => "Logs",
         }
@@ -31,8 +31,8 @@ impl WorkTab {
 
     pub fn next(self) -> Self {
         match self {
-            WorkTab::Selection => WorkTab::Preview,
-            WorkTab::Preview => WorkTab::Queue,
+            WorkTab::Selection => WorkTab::Details,
+            WorkTab::Details => WorkTab::Queue,
             WorkTab::Queue => WorkTab::Logs,
             WorkTab::Logs => WorkTab::Selection,
         }
@@ -41,8 +41,8 @@ impl WorkTab {
     pub fn previous(self) -> Self {
         match self {
             WorkTab::Selection => WorkTab::Logs,
-            WorkTab::Preview => WorkTab::Selection,
-            WorkTab::Queue => WorkTab::Preview,
+            WorkTab::Details => WorkTab::Selection,
+            WorkTab::Queue => WorkTab::Details,
             WorkTab::Logs => WorkTab::Queue,
         }
     }
@@ -62,7 +62,7 @@ pub enum Action {
     ToggleSelectCurrent,
     NextTab,
     PreviousTab,
-    OpenPreview,
+    OpenDetails,
     OpenLogsTab,
     QueueDownloadSelected,
     QueueDownloadFolder,

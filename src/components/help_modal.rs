@@ -12,7 +12,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from("Navigation: Up/Down move, Enter open, Backspace parent"),
         Line::from("Selection: Space toggle, a select all, x clear"),
-        Line::from("Tabs/Views: Tab next, Shift+Tab previous, p preview, l logs"),
+        Line::from("Tabs/Views: Tab next, Shift+Tab previous, p details, l logs"),
         Line::from("Operations: d download selected, D download folder, S select script, s run script, r refresh"),
         Line::from("System: h/? toggle help, q quit, y confirm quit, Esc close dialogs"),
     ];

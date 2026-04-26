@@ -90,7 +90,7 @@ fn render_work_pane(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 
     match app.ui.tab {
         WorkTab::Selection => components::selection::render(frame, content_area, app),
-        WorkTab::Preview => components::preview::render(frame, content_area, app),
+        WorkTab::Details => components::details::render(frame, content_area, app),
         WorkTab::Queue => components::queue::render(frame, content_area, app),
         WorkTab::Logs => render_logs(frame, content_area, app),
     }

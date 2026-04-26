@@ -355,8 +355,8 @@ impl App {
             Action::PreviousTab => {
                 self.ui.tab = self.ui.tab.previous();
             }
-            Action::OpenPreview | Action::InputChar('p') => {
-                self.ui.tab = WorkTab::Preview;
+            Action::OpenDetails | Action::InputChar('p') => {
+                self.ui.tab = WorkTab::Details;
             }
             Action::OpenLogsTab | Action::InputChar('l') => {
                 self.ui.tab = WorkTab::Logs;
@@ -1274,9 +1274,9 @@ impl App {
                 self.navigate_to_prefix(normalize_prefix(&item.key), "open-dir")
             }
             BrowserItemKind::Obj => {
-                self.ui.tab = WorkTab::Preview;
+                self.ui.tab = WorkTab::Details;
                 self.logs
-                    .push(format!("INFO open object preview key={}", item.key));
+                    .push(format!("INFO open object details key={}", item.key));
             }
         }
     }
