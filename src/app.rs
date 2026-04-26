@@ -1087,3 +1087,153 @@ impl SelectionPlan {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_plan_skips_overlapping_prefixes_and_covered_objects() {
+        let selected = BTreeSet::from([
+            "logs/".to_string(),
+            "logs/archive/".to_string(),
+            "logs/2026-04-01.log".to_string(),
+            "reports/".to_string(),
+            "reports/summary.csv".to_string(),
+            "README.txt".to_string(),
+        ]);
+
+        let plan = SelectionPlan::from_selected(&selected);
+        assert_eq!(plan.selected_prefix_count, 3);
+        assert_eq!(plan.selected_object_count, 3);
+        assert_eq!(plan.effective_prefixes, vec!["logs/", "reports/"]);
+        assert_eq!(plan.effective_object_keys, vec!["README.txt"]);
+        assert_eq!(plan.overlapping_prefixes_skipped, 1);
+        assert_eq!(plan.covered_objects_skipped, 2);
+    }
+
+    #[test]
+    fn resolve_selected_objects_uses_direct_selection_without_prefix_queries() {
+        let mut app = App::new();
+        app.browser.items = vec![
+            BrowserItem {
+                kind: BrowserItemKind::Obj,
+                is_dir: false,
+                key: "z.txt".to_string(),
+                name: "z.txt".to_string(),
+                size: Some(99),
+                modified: "-".to_string(),
+            },
+            BrowserItem {
+                kind: BrowserItemKind::Obj,
+                is_dir: false,
+                key: "a.txt".to_string(),
+                name: "a.txt".to_string(),
+                size: Some(11),
+                modified: "-".to_string(),
+            },
+        ];
+        app.browser.selected = BTreeSet::from(["z.txt".to_string(), "a.txt".to_string()]);
+
+        let resolution = app.resolve_selected_objects().expect("resolution succeeds");
+
+        let keys = resolution
+            .objects
+            .iter()
+            .map(|obj| obj.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["a.txt", "z.txt"]);
+        assert_eq!(resolution.stats.selected_prefix_count, 0);
+        assert_eq!(resolution.stats.selected_object_count, 2);
+        assert_eq!(resolution.stats.effective_prefix_count, 0);
+        assert_eq!(resolution.stats.effective_direct_object_count, 2);
+    }
+
+    #[test]
+    fn prepare_download_queue_dedups_by_key_and_uses_stable_sort() {
+        let mut app = App::new();
+        app.prepare_download_queue(vec![
+            S3ObjectSummary {
+                key: "b/file.txt".to_string(),
+                size: 1,
+                modified: "-".to_string(),
+            },
+            S3ObjectSummary {
+                key: "a/file.txt".to_string(),
+                size: 10,
+                modified: "-".to_string(),
+            },
+            S3ObjectSummary {
+                key: "a/file.txt".to_string(),
+                size: 20,
+                modified: "mtime".to_string(),
+            },
+        ]);
+
+        let keys = app
+            .queue
+            .jobs
+            .iter()
+            .map(|job| job.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["a/file.txt", "b/file.txt"]);
+        assert_eq!(app.queue.total_files, 2);
+        assert_eq!(app.queue.total_bytes, 21);
+    }
+
+    #[test]
+    fn queue_status_counts_reports_each_bucket() {
+        let mut app = App::new();
+        app.queue.jobs = vec![
+            QueueJob {
+                key: "a".to_string(),
+                local_path: PathBuf::from("a"),
+                size: 1,
+                status: QueueJobStatus::Pending,
+                attempts: 0,
+                error: None,
+            },
+            QueueJob {
+                key: "b".to_string(),
+                local_path: PathBuf::from("b"),
+                size: 1,
+                status: QueueJobStatus::Running,
+                attempts: 1,
+                error: None,
+            },
+            QueueJob {
+                key: "c".to_string(),
+                local_path: PathBuf::from("c"),
+                size: 1,
+                status: QueueJobStatus::Done,
+                attempts: 1,
+                error: None,
+            },
+            QueueJob {
+                key: "d".to_string(),
+                local_path: PathBuf::from("d"),
+                size: 1,
+                status: QueueJobStatus::Failed,
+                attempts: 2,
+                error: Some("err".to_string()),
+            },
+        ];
+
+        assert_eq!(app.queue_status_counts(), (1, 1, 1, 1));
+    }
+
+    #[test]
+    fn queue_selected_with_empty_selection_warns_and_does_not_queue() {
+        let mut app = App::new();
+        app.browser.selected.clear();
+
+        app.update(Action::QueueDownloadSelected);
+
+        assert_eq!(app.queue.total_files, 0);
+        assert!(app
+            .browser
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains("No selection to queue")));
+    }
+}
