@@ -11,7 +11,7 @@ use crate::app::App;
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from(
-            "Keys: h help  c connection  q quit  ↑↓ move  Enter open  Backspace up  Space select  a all  x clear  d download  l logs"
+            "Keys: h help  c connection  S scripts  q quit  ↑↓ move  Enter open  Backspace up  Space select  a all  x clear  d download  l logs  s run-script"
                 .dim()
                 .to_string(),
         ),
@@ -25,12 +25,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             app.queue.eta
         )),
         Line::from(format!(
-            "Profile: {}  Region: {}  Bucket: {}  Target: {}  Script: {}  Last: {}",
+            "Profile: {}  Region: {}  Bucket: {}  Target: {}  Script: {}  Mode: {}  Last: {}",
             app.display_profile(),
             app.session.region,
             app.session.bucket,
             app.display_effective_target(),
-            app.script.command,
+            app.selected_script_label(),
+            app.script_mode_label(),
             app.script.last_result
         )),
     ];

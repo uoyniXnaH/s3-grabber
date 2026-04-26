@@ -4,6 +4,22 @@ pub enum ScriptMode {
     PostBatch,
 }
 
+impl ScriptMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ScriptMode::PerFile => "per-file",
+            ScriptMode::PostBatch => "post-batch",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            ScriptMode::PerFile => ScriptMode::PostBatch,
+            ScriptMode::PostBatch => ScriptMode::PerFile,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScriptRunner {
     pub command: String,

@@ -38,6 +38,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         components::connection_settings::render(frame, area, app);
     }
 
+    if app.ui.show_script_picker {
+        components::script_picker::render(frame, area, app);
+    }
+
     if app.ui.confirm_quit {
         render_quit_dialog(frame, area);
     }

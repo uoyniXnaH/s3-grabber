@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use crate::action::{Action, Focus, WorkTab};
@@ -8,6 +10,7 @@ use crate::services::s3::{
     download_object_to_path_sync, list_all_objects_sync, list_objects_sync, resolve_target,
     validate_endpoint_url, S3ConnectParams, S3ListResult, S3ObjectSummary, S3Target, TargetWarning,
 };
+use crate::services::script::ScriptMode;
 
 #[derive(Debug, Clone)]
 pub struct SessionState {
@@ -77,7 +80,12 @@ pub struct QueueJob {
 
 #[derive(Debug, Clone)]
 pub struct ScriptState {
+    pub script_dir: PathBuf,
+    pub available_scripts: Vec<String>,
     pub command: String,
+    pub mode: ScriptMode,
+    pub last_exit_code: Option<i32>,
+    pub last_stderr_summary: String,
     pub last_result: String,
 }
 
@@ -140,6 +148,9 @@ pub struct UiState {
     pub show_help: bool,
     pub confirm_quit: bool,
     pub show_connection_settings: bool,
+    pub show_script_picker: bool,
+    pub script_picker_cursor: usize,
+    pub script_picker_error: Option<String>,
     pub connection_draft: ConnectionDraft,
 }
 
@@ -195,7 +206,7 @@ impl App {
             mode: "Browse".to_string(),
         };
 
-        Self {
+        let mut app = Self {
             running: true,
             browser: BrowserState {
                 items,
@@ -215,7 +226,12 @@ impl App {
                 jobs: Vec::new(),
             },
             script: ScriptState {
-                command: "./post-process.sh".to_string(),
+                script_dir: PathBuf::from("./scripts"),
+                available_scripts: Vec::new(),
+                command: String::new(),
+                mode: ScriptMode::PostBatch,
+                last_exit_code: None,
+                last_stderr_summary: String::new(),
                 last_result: "idle".to_string(),
             },
             ui: UiState {
@@ -224,6 +240,9 @@ impl App {
                 show_help: false,
                 confirm_quit: false,
                 show_connection_settings: false,
+                show_script_picker: false,
+                script_picker_cursor: 0,
+                script_picker_error: None,
                 connection_draft: ConnectionDraft {
                     profile: session.profile.clone(),
                     region: session.region.clone(),
@@ -239,7 +258,10 @@ impl App {
             download_concurrency: AppConfig::default().concurrency.max(1),
             download_root: PathBuf::from(AppConfig::default().download_dir),
             session,
-        }
+        };
+
+        app.refresh_script_catalog();
+        app
     }
 
     pub fn update(&mut self, action: Action) {
@@ -265,6 +287,11 @@ impl App {
             return;
         }
 
+        if self.ui.show_script_picker {
+            self.update_script_picker_modal(action);
+            return;
+        }
+
         match action {
             Action::QuitRequested | Action::InputChar('q') => {
                 if self.queue.total_files > self.queue.done_files {
@@ -278,6 +305,9 @@ impl App {
             }
             Action::InputChar('c') | Action::InputChar('C') => {
                 self.open_connection_settings();
+            }
+            Action::InputChar('S') => {
+                self.open_script_picker();
             }
             Action::MoveUp => {
                 self.browser.cursor = self.browser.cursor.saturating_sub(1);
@@ -338,10 +368,7 @@ impl App {
                 self.queue_download_folder();
             }
             Action::RunScript | Action::InputChar('s') => {
-                self.session.mode = "Script".to_string();
-                self.script.last_result = "last run: success".to_string();
-                self.logs
-                    .push("INFO post-process script completed".to_string());
+                self.run_configured_script_now();
             }
             Action::Refresh | Action::InputChar('r') => {
                 self.reload_current_listing();
@@ -424,6 +451,18 @@ impl App {
         }
     }
 
+    pub fn script_mode_label(&self) -> &'static str {
+        self.script.mode.label()
+    }
+
+    pub fn selected_script_label(&self) -> &str {
+        if self.script.command.is_empty() {
+            "(none)"
+        } else {
+            self.script.command.as_str()
+        }
+    }
+
     pub fn connection_modal_warning(&self) -> Option<&'static str> {
         let (_, warning) = resolve_target(
             &self.ui.connection_draft.profile,
@@ -446,6 +485,27 @@ impl App {
         self.ui.connection_draft.active_field = ConnectionField::Profile;
         self.ui.connection_draft.error = None;
         self.ui.show_connection_settings = true;
+    }
+
+    fn open_script_picker(&mut self) {
+        self.refresh_script_catalog();
+        self.ui.show_script_picker = true;
+        self.ui.script_picker_error = None;
+        if let Some(index) = self
+            .script
+            .available_scripts
+            .iter()
+            .position(|name| *name == self.script.command)
+        {
+            self.ui.script_picker_cursor = index;
+        } else if self.script.available_scripts.is_empty() {
+            self.ui.script_picker_cursor = 0;
+        } else {
+            self.ui.script_picker_cursor = self
+                .ui
+                .script_picker_cursor
+                .min(self.script.available_scripts.len() - 1);
+        }
     }
 
     fn update_connection_modal(&mut self, action: Action) {
@@ -473,6 +533,47 @@ impl App {
                     let target = self.active_connection_field_mut();
                     target.push(ch);
                     self.ui.connection_draft.error = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn update_script_picker_modal(&mut self, action: Action) {
+        match action {
+            Action::CancelDialog => {
+                self.ui.show_script_picker = false;
+            }
+            Action::MoveUp => {
+                self.ui.script_picker_cursor = self.ui.script_picker_cursor.saturating_sub(1);
+            }
+            Action::MoveDown => {
+                if self.ui.script_picker_cursor + 1 < self.script.available_scripts.len() {
+                    self.ui.script_picker_cursor += 1;
+                }
+            }
+            Action::InputChar('r') | Action::Refresh => {
+                self.refresh_script_catalog();
+            }
+            Action::InputChar('m') | Action::MoveLeft | Action::MoveRight => {
+                self.script.mode = self.script.mode.toggle();
+            }
+            Action::Enter => {
+                if let Some(selected) = self
+                    .script
+                    .available_scripts
+                    .get(self.ui.script_picker_cursor)
+                    .cloned()
+                {
+                    self.script.command = selected;
+                    self.ui.show_script_picker = false;
+                    self.logs.push(format!(
+                        "INFO selected script={} mode={}",
+                        self.script.command,
+                        self.script.mode.label()
+                    ));
+                } else {
+                    self.ui.script_picker_error = Some("No script selected".to_string());
                 }
             }
             _ => {}
@@ -582,6 +683,152 @@ impl App {
 
         self.ui.connection_draft.error = None;
         self.ui.show_connection_settings = false;
+    }
+
+    fn refresh_script_catalog(&mut self) {
+        self.script.available_scripts.clear();
+        self.ui.script_picker_error = None;
+
+        let read_dir = match fs::read_dir(&self.script.script_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.ui.script_picker_error = Some(format!(
+                    "Failed to read script directory {}: {err}",
+                    self.script.script_dir.display()
+                ));
+                return;
+            }
+        };
+
+        let mut names = read_dir
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|file_type| file_type.is_file())
+                    .map(|_| entry.file_name())
+            })
+            .filter_map(|name| name.into_string().ok())
+            .collect::<Vec<_>>();
+        names.sort();
+
+        self.script.available_scripts = names;
+        if self.script.available_scripts.is_empty() {
+            self.script.command.clear();
+            return;
+        }
+
+        if !self.script.command.is_empty()
+            && self
+                .script
+                .available_scripts
+                .iter()
+                .any(|name| *name == self.script.command)
+        {
+            return;
+        }
+
+        if let Some(first) = self.script.available_scripts.first() {
+            self.script.command = first.clone();
+        }
+    }
+
+    fn run_configured_script_now(&mut self) {
+        self.run_selected_script("manual", &[]);
+    }
+
+    fn run_selected_script_for_file(&mut self, key: &str, local_path: &Path) {
+        let args = vec![
+            "--mode".to_string(),
+            "per-file".to_string(),
+            "--key".to_string(),
+            key.to_string(),
+            "--path".to_string(),
+            local_path.display().to_string(),
+        ];
+        self.run_selected_script("per-file", &args);
+    }
+
+    fn run_selected_script_post_batch(&mut self) {
+        let args = vec![
+            "--mode".to_string(),
+            "post-batch".to_string(),
+            "--done-files".to_string(),
+            self.queue.done_files.to_string(),
+            "--total-files".to_string(),
+            self.queue.total_files.to_string(),
+        ];
+        self.run_selected_script("post-batch", &args);
+    }
+
+    fn run_selected_script(&mut self, reason: &str, args: &[String]) {
+        if self.script.command.is_empty() {
+            self.script.last_result = "last run: skipped (no script selected)".to_string();
+            self.script.last_exit_code = None;
+            self.script.last_stderr_summary = "no script selected".to_string();
+            self.logs
+                .push("WARN script run requested but no script is selected".to_string());
+            return;
+        }
+
+        let script_path = self.script.script_dir.join(&self.script.command);
+        let previous_mode = self.session.mode.clone();
+        self.session.mode = "Script".to_string();
+        self.logs.push(format!(
+            "INFO running script reason={} mode={} path={} args={:?}",
+            reason,
+            self.script.mode.label(),
+            script_path.display(),
+            args
+        ));
+
+        let output = Command::new(&script_path).args(args).output();
+        match output {
+            Ok(output) => {
+                let exit_code = output.status.code().unwrap_or(-1);
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+                self.script.last_exit_code = Some(exit_code);
+                self.script.last_stderr_summary = if stderr.is_empty() {
+                    "-".to_string()
+                } else {
+                    stderr.lines().next().unwrap_or("-").to_string()
+                };
+
+                if output.status.success() {
+                    self.script.last_result = format!("last run: success (exit={exit_code})");
+                    self.logs.push(format!(
+                        "INFO script completed exit={} stderr={}",
+                        exit_code, self.script.last_stderr_summary
+                    ));
+                } else {
+                    self.script.last_result = format!("last run: failed (exit={exit_code})");
+                    self.logs.push(format!(
+                        "WARN script failed exit={} stderr={}",
+                        exit_code, self.script.last_stderr_summary
+                    ));
+                }
+
+                if !stdout.is_empty() {
+                    self.logs.push(format!(
+                        "INFO script stdout: {}",
+                        stdout.lines().next().unwrap_or("")
+                    ));
+                }
+            }
+            Err(err) => {
+                self.script.last_exit_code = None;
+                self.script.last_stderr_summary = err.to_string();
+                self.script.last_result = "last run: failed (exec error)".to_string();
+                self.logs.push(format!(
+                    "WARN script execution error: {}",
+                    self.script.last_stderr_summary
+                ));
+            }
+        }
+        self.session.mode = previous_mode;
     }
 
     fn queue_download_selected(&mut self) {
@@ -728,6 +975,9 @@ impl App {
                         download.bytes_written,
                         path.display()
                     ));
+                    if self.script.mode == ScriptMode::PerFile {
+                        self.run_selected_script_for_file(&key, &path);
+                    }
                 }
                 Err(err) => {
                     let attempts = self.queue.jobs[index].attempts;
@@ -761,6 +1011,9 @@ impl App {
             .all(|job| matches!(job.status, QueueJobStatus::Done | QueueJobStatus::Failed))
             && self.session.mode == "Download"
         {
+            if self.script.mode == ScriptMode::PostBatch {
+                self.run_selected_script_post_batch();
+            }
             self.queue.eta = "00:00".to_string();
             self.session.mode = "Browse".to_string();
             self.logs.push("INFO download queue completed".to_string());
@@ -1384,5 +1637,21 @@ mod tests {
         assert_eq!(format_eta(5), "00:05");
         assert_eq!(format_eta(125), "02:05");
         assert_eq!(format_eta(3_726), "01:02:06");
+    }
+
+    #[test]
+    fn selected_script_label_defaults_to_none() {
+        let app = App::new();
+        assert_eq!(app.selected_script_label(), "(none)");
+    }
+
+    #[test]
+    fn script_picker_modal_toggles_mode_with_m() {
+        let mut app = App::new();
+        app.ui.show_script_picker = true;
+        app.script.mode = ScriptMode::PostBatch;
+
+        app.update(Action::InputChar('m'));
+        assert_eq!(app.script.mode, ScriptMode::PerFile);
     }
 }
