@@ -8,7 +8,7 @@ The app must let users:
 - Select objects or full folders for download.
 - Track download progress.
 - Run a custom post-process script.
-- Preview text-based objects.
+- Inspect object metadata before download.
 
 ## 2. Screen Layout
 The screen is divided into three major sections.
@@ -45,13 +45,13 @@ Features:
 #### Right Pane: Work Pane Tabs
 Tabs:
 - `Selection`
-- `Preview`
+- `Details`
 - `Queue`
 - `Logs`
 
 Tab responsibilities:
 - `Selection`: selected objects/folders, total file count/bytes, target download path.
-- `Preview`: read-only text preview and object metadata.
+- `Details`: metadata-only view for current browser item (object key, size, modified time, local download path).
 - `Queue`: pending/running/completed/failed download jobs with progress.
 - `Logs`: timestamped operational logs, warnings, errors, script output summaries.
 
@@ -79,13 +79,12 @@ Cross-platform safe keys only.
 ### 3.3 Tabs and Views
 - `Tab`: next tab in right pane.
 - `Shift+Tab`: previous tab in right pane.
-- `p`: open preview for current object.
-- `l`: jump directly to `Logs` tab.
 
 ### 3.4 Operations
 - `d`: queue download for current selection.
 - `D`: queue download for full current folder prefix.
 - `s`: run post-process script (configured mode).
+- `S`: open Script Picker modal.
 - `r`: refresh list.
 - `/`: open filter/search input.
 - `c`: open Connection Settings modal.
@@ -152,46 +151,59 @@ Content groups:
 Footer requirement:
 - Always show `h help` hint in bottom key-hint line.
 
-## 6. State Model
+## 6. Script Picker Modal
+Runtime script selection popup using a local scripts directory.
+
+Behavior:
+- Triggered by `S`.
+- Centered modal popup over existing UI.
+- Lists scripts found under `./scripts` (default directory).
+- `Up`/`Down` move cursor in script list.
+- `m` toggles script mode (`per-file` / `post-batch`).
+- `r` rescans script directory.
+- `Enter` selects highlighted script.
+- `Esc` closes modal without changing current selection.
+
+## 7. State Model
 Core UI/application state components:
 - `SessionState`: profile, region, bucket, current prefix, endpoint_url, connectivity.
 - `BrowserState`: item list, cursor index, selected set, warning message.
 - `SelectionState`: selected object keys and selected folder prefixes.
-- `PreviewState`: key, loading status, text buffer, truncation, preview errors.
+- `DetailsState`: current item metadata projection for right-pane details tab.
 - `QueueState`: jobs and aggregate progress.
-- `ScriptState`: command config, execution mode, last exit code and stderr summary.
-- `UiState`: active pane focus, active tab, modal flags (`help`, `confirm_quit`, `connection_settings`), notifications.
+- `ScriptState`: script directory, available scripts, selected script, execution mode, last exit code and stderr summary.
+- `UiState`: active pane focus, active tab, modal flags (`help`, `confirm_quit`, `connection_settings`, `script_picker`), notifications.
 - `ConnectionDraft`: editable connection fields (`profile`, `region`, `bucket`, `prefix`, `endpoint_url`) and validation error.
-- `ConfigState`: defaults for download dir, concurrency, retries, preview limit.
+- `ConfigState`: defaults for download dir, concurrency, retries.
 
-## 7. Functional Rules
+## 8. Functional Rules
 - Left pane is dedicated to browsing/selecting S3 items.
 - Right pane displays details/workflow state only.
 - Long operations must not block keyboard navigation.
-- Preview supports text-like content only.
-- Unsupported/binary content shows metadata-only preview message.
+- Details tab is metadata-only and does not fetch/render object body content.
 - Confirm before quitting with running jobs.
 - Connection settings are changeable at runtime via `c` modal.
+- Script selection is changeable at runtime via `S` modal.
 - Target precedence: `profile` > `endpoint-url` > default chain.
 - If `profile` and `endpoint-url` are both set, endpoint is ignored (with warning).
 - If effective `endpoint-url` connection fails, app must not fall back to default chain.
 - `r` refresh performs a real S3 listing and reports failures in left-pane warning + logs.
 
-## 8. MVP Constraints
-- Text preview size cap (default: `1 MiB`).
+## 9. MVP Constraints
 - Download retries with backoff (default: `3` retries).
 - Keyboard-only operation must be complete.
 - Color should assist readability but not encode critical meaning alone.
 - Minimum supported terminal size: `100x30`.
 
-## 9. Acceptance Criteria (UI V1)
+## 10. Acceptance Criteria (UI V1)
 - User can browse prefixes/objects and navigate fully by keyboard.
 - User can select multiple objects and full folder prefixes.
 - User can queue downloads and observe per-job + aggregate progress.
-- User can preview supported text content or see clear unsupported message.
+- User can open Details (`p`) and inspect metadata for the currently highlighted item.
 - User can open Help (`h`) and understand all major key actions.
 - User can jump to logs with `l` and troubleshoot failed operations.
 - User can open Connection Settings (`c`), edit profile/region/bucket/prefix, and apply changes.
+- User can open Script Picker (`S`), select a script from `./scripts`, and toggle execution mode.
 - User can optionally set `endpoint-url` for local S3 mock endpoints and apply changes.
 - User can see effective target in top/bottom status (`profile` target hides ignored endpoint as active target).
 - Invalid or unreachable endpoint-url shows warning in S3 Browser and does not auto-fallback.
