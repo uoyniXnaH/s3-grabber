@@ -62,8 +62,6 @@ pub enum Action {
     ToggleSelectCurrent,
     NextTab,
     PreviousTab,
-    OpenDetails,
-    OpenLogsTab,
     QueueDownloadSelected,
     QueueDownloadFolder,
     RunScript,

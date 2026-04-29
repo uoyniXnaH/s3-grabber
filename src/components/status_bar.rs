@@ -11,7 +11,7 @@ use crate::app::App;
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from(
-            "Keys: h help  c connection  S scripts  q quit  ↑↓ move  Enter open  Backspace up  Space select  a all  x clear  d download  l logs  s run-script"
+            "Keys: h help  c connection  S scripts  q quit  ↑↓ move  Enter open  Backspace up  Space select  a all  x clear  d download  s run-script"
                 .dim()
                 .to_string(),
         ),

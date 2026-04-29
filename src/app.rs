@@ -355,12 +355,6 @@ impl App {
             Action::PreviousTab => {
                 self.ui.tab = self.ui.tab.previous();
             }
-            Action::OpenDetails | Action::InputChar('p') => {
-                self.ui.tab = WorkTab::Details;
-            }
-            Action::OpenLogsTab | Action::InputChar('l') => {
-                self.ui.tab = WorkTab::Logs;
-            }
             Action::QueueDownloadSelected | Action::InputChar('d') => {
                 self.queue_download_selected();
             }
