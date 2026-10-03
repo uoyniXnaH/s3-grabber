@@ -41,6 +41,7 @@ Features:
 - Enter/open folder behavior.
 - Multi-selection.
 - Filter/search.
+- Before the first successful connection, show a prompt to configure an AWS profile or endpoint and bucket instead of listing placeholder items.
 
 #### Right Pane: Work Pane Tabs
 Tabs:
@@ -178,6 +179,7 @@ Core UI/application state components:
 
 ## 8. Functional Rules
 - Left pane is dedicated to browsing/selecting S3 items.
+- When no S3 connection has been applied, the browser shows a prompt to configure a connection with `c`; it does not show placeholder S3 objects.
 - Right pane displays details/workflow state only.
 - Long operations must not block keyboard navigation.
 - Details tab is metadata-only and does not fetch/render object body content.

@@ -14,9 +14,10 @@ use crate::{
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let [top, main, bottom] = Layout::vertical([
+    let [top, main, warning, bottom] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(12),
+        Constraint::Length(1),
         Constraint::Length(3),
     ])
     .areas(area);
@@ -28,6 +29,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     components::browser::render(frame, left, app);
     render_work_pane(frame, right, app);
 
+    components::warning_bar::render(frame, warning, app);
     components::status_bar::render(frame, bottom, app);
 
     if app.ui.show_help {
@@ -57,7 +59,7 @@ fn render_top_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
         "Profile: {}  Region: {}  Bucket: {}  Path: {}  Target: {}  Mode: {}  Focus: {}",
         app.display_profile(),
         app.session.region,
-        app.session.bucket,
+        app.display_bucket(),
         app.session.path,
         app.display_effective_target(),
         app.session.mode,

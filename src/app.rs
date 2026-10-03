@@ -20,6 +20,7 @@ pub struct SessionState {
     pub path: String,
     pub endpoint_url: String,
     pub mode: String,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -170,46 +171,20 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let items = vec![
-            BrowserItem {
-                kind: BrowserItemKind::Dir,
-                is_dir: true,
-                key: "logs/".to_string(),
-                name: "logs/".to_string(),
-                size: None,
-                modified: "-".to_string(),
-            },
-            BrowserItem {
-                kind: BrowserItemKind::Dir,
-                is_dir: true,
-                key: "reports/".to_string(),
-                name: "reports/".to_string(),
-                size: None,
-                modified: "-".to_string(),
-            },
-            BrowserItem {
-                kind: BrowserItemKind::Obj,
-                is_dir: false,
-                key: "README.txt".to_string(),
-                name: "README.txt".to_string(),
-                size: Some(2_048),
-                modified: "2026-03-20 10:00".to_string(),
-            },
-        ];
-
         let session = SessionState {
             profile: "".to_string(),
             region: "ap-northeast-1".to_string(),
-            bucket: "my-bucket".to_string(),
+            bucket: "".to_string(),
             path: "/".to_string(),
             endpoint_url: "".to_string(),
             mode: "Browse".to_string(),
+            connected: false,
         };
 
         let mut app = Self {
             running: true,
             browser: BrowserState {
-                items,
+                items: Vec::new(),
                 cursor: 0,
                 selected: BTreeSet::new(),
                 warning: None,
@@ -436,6 +411,14 @@ impl App {
         }
     }
 
+    pub fn display_bucket(&self) -> &str {
+        if self.session.connected {
+            &self.session.bucket
+        } else {
+            "(not connected)"
+        }
+    }
+
     pub fn display_effective_target(&self) -> String {
         let (target, _) = resolve_target(&self.session.profile, &self.session.endpoint_url);
         match target {
@@ -642,6 +625,7 @@ impl App {
         self.session.path = effective_prefix;
         self.session.endpoint_url = draft_endpoint;
         self.session.mode = "Browse".to_string();
+        self.session.connected = true;
         self.browser.warning = None;
 
         self.browser.items = self.build_browser_items(&listing);

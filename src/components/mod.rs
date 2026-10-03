@@ -6,3 +6,4 @@ pub mod queue;
 pub mod script_picker;
 pub mod selection;
 pub mod status_bar;
+pub mod warning_bar;
